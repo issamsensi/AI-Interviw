@@ -85,6 +85,13 @@ Set the following environment variables (copy from `.env.example`):
 | -------------------- | -------------------- |
 | `GROQ_API_KEY`       | Groq LLM API key     |
 | `ELEVENLABS_API_KEY` | ElevenLabs TTS key   |
+| `CORS_ORIGINS`       | Comma-separated frontend origins |
+
+For Docker deployment, copy `.env.example` to `.env` and replace the database
+password and provider placeholders. The frontend uses same-origin
+relative API and WebSocket URLs in the production container. When hosting the
+frontend separately, set the frontend build variables `VITE_API_URL` and,
+optionally, `VITE_WS_URL` to the deployed backend origin(s).
 
 ### Running with Docker
 

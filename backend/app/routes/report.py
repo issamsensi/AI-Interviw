@@ -19,9 +19,14 @@ router = APIRouter(prefix="/api", tags=["report"])
 
 @router.get("/report/{interview_id}")
 async def get_report(interview_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        parsed_interview_id = uuid.UUID(interview_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid interview ID")
+
     result = await db.execute(
         select(Interview)
-        .where(Interview.id == uuid.UUID(interview_id))
+        .where(Interview.id == parsed_interview_id)
         .options(
             selectinload(Interview.questions),
             selectinload(Interview.answers),

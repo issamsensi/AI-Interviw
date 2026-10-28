@@ -38,7 +38,9 @@ async def extract_text_from_image(file_bytes: bytes) -> str:
 
 
 async def extract_text(file_bytes: bytes, filename: str) -> str:
-    if filename.lower().endswith(".pdf"):
+    extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if extension == ".pdf":
         return await extract_text_from_pdf(file_bytes)
-    else:
+    if extension in {".png", ".jpg", ".jpeg"}:
         return await extract_text_from_image(file_bytes)
+    return ""
