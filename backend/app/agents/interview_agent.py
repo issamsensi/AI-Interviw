@@ -1,7 +1,5 @@
 import logging
 
-from app.services.groq_client import groq_chat
-
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a senior recruiter conducting a live interview.

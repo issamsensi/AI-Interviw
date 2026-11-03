@@ -9,6 +9,7 @@ from app.config import settings
 from app.database import engine, init_db
 from app.routes.resume import router as resume_router
 from app.routes.interview import router as interview_router
+from app.routes.profile import router as profile_router
 from app.routes.report import router as report_router
 
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,7 @@ app.add_middleware(
 app.include_router(resume_router)
 app.include_router(interview_router)
 app.include_router(report_router)
+app.include_router(profile_router)
 
 
 @app.on_event("startup")

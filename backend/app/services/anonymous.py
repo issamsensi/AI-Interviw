@@ -22,7 +22,7 @@ async def ensure_anonymous_user(db: AsyncSession, anonymous_id: str | None) -> U
     if user:
         return user
 
-    user = User(id=user_id)
+    user = User(id=user_id, is_guest=True)
     db.add(user)
     try:
         await db.flush()

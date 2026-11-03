@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Brand palette — Navy #172B3A, Forest #285B4A, Sage #E9F0EA, Ivory #F7F7F2,
+   Sand #C99B68. The numbered scales are CSS variables so light/dark mode
+   can remap them: in dark mode the "navy" text scale inverts to Sage/Ivory
+   on Navy surfaces, while bg-navy (the constant) stays Navy in both modes. */
+:root {
+  --background: #f7f7f2;
+  --foreground: #172b3a;
+  --navy-50: #e9f0ea;
+  --navy-100: #d8e2dc;
+  --navy-200: #b7c6be;
+  --navy-600: #2e4a5e;
+  --navy-700: #21394c;
+  --navy-800: #1c3244;
+  --navy-900: #172b3a;
+  --accent-50: #e9f0ea;
+  --accent-100: #d3e0d6;
+  --accent-600: #285b4a;
+  --accent-700: #1e4638;
+}
+
+.dark {
+  --background: #12222f;
+  --foreground: #f7f7f2;
+  --navy-50: #1c3244;
+  --navy-100: #21394c;
+  --navy-200: #35536b;
+  --navy-600: #aec0b6;
+  --navy-700: #c7d5cc;
+  --navy-800: #e9f0ea;
+  --navy-900: #f7f7f2;
+  --accent-50: #1e4638;
+  --accent-100: #285b4a;
+  --accent-600: #5da887;
+  --accent-700: #a9d3bd;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-navy: #172b3a;
+  --color-forest: #285b4a;
+  --color-sage: #e9f0ea;
+  --color-ivory: #f7f7f2;
+  --color-sand: #c99b68;
+  --color-navy-50: var(--navy-50);
+  --color-navy-100: var(--navy-100);
+  --color-navy-200: var(--navy-200);
+  --color-navy-600: var(--navy-600);
+  --color-navy-700: var(--navy-700);
+  --color-navy-800: var(--navy-800);
+  --color-navy-900: var(--navy-900);
+  --color-accent-50: var(--accent-50);
+  --color-accent-100: var(--accent-100);
+  --color-accent-600: var(--accent-600);
+  --color-accent-700: var(--accent-700);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* The home page breaks out to full viewport width; never scroll sideways for it. */
+  overflow-x: clip;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent-600);
+  outline-offset: 2px;
+}

@@ -1,44 +1,59 @@
-import logging
+"""Deprecated compatibility shim.
 
-from groq import AsyncGroq
+``groq_chat`` used to call Groq directly. It now delegates to the
+provider-independent Meta client (:mod:`app.services.meta_client`) with
+the same call signature. New code must import from ``meta_client``.
+This module imports nothing from the ``groq`` package.
+"""
 
-from app.config import settings
+import warnings
 
-logger = logging.getLogger(__name__)
+from app.services.meta_client import (
+    MetaAuthError,
+    MetaClientError,
+    MetaConfigurationError,
+    MetaInvalidResponseError,
+    MetaRateLimitError,
+    MetaServerError,
+    MetaTimeoutError,
+    clean_llm_response,
+    meta_chat,
+    meta_error_to_http,
+    resolve_model,
+)
 
-client = AsyncGroq(api_key=settings.groq_api_key)
+__all__ = [
+    "MetaAuthError",
+    "MetaClientError",
+    "MetaConfigurationError",
+    "MetaInvalidResponseError",
+    "MetaRateLimitError",
+    "MetaServerError",
+    "MetaTimeoutError",
+    "clean_llm_response",
+    "groq_chat",
+    "meta_chat",
+    "meta_error_to_http",
+    "resolve_model",
+]
 
 
 async def groq_chat(
     system_prompt: str,
     user_prompt: str,
-    model: str = "llama-3.3-70b-versatile",
+    model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 1024,
 ) -> str:
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        content = response.choices[0].message.content or ""
-        return _clean_llm_response(content)
-    except Exception as e:
-        logger.error(f"Groq API call failed: {e}")
-        return ""
-
-
-def _clean_llm_response(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1] if "\n" in text else text[3:]
-    if text.endswith("```"):
-        text = text.rsplit("```", 1)[0]
-    if text.startswith("json"):
-        text = text[4:]
-    return text.strip()
+    warnings.warn(
+        "groq_chat is deprecated; use app.services.meta_client.meta_chat",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return await meta_chat(
+        system_prompt,
+        user_prompt,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )

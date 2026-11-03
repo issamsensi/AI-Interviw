@@ -3,7 +3,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Header
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect, Header
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,11 +21,11 @@ from app.agents.interview_agent import SYSTEM_PROMPT as AGENT_SYSTEM_PROMPT
 from app.agents.interview_agent import build_follow_up_prompt
 from app.agents.evaluator import SYSTEM_PROMPT as EVAL_SYSTEM_PROMPT
 from app.agents.evaluator import build_evaluation_prompt
-from app.services.groq_client import groq_chat
-from app.services.stt import transcribe_audio
-from app.services.tts import synthesize_speech
+from app.services.meta_client import MetaClientError, meta_chat, meta_error_to_http
+from app.services.stt import STTError, stt_error_to_http, transcribe_audio
+from app.services.tts import TTSError, synthesize_speech, tts_enabled
 from app.websocket.manager import manager
-from app.services.anonymous import ensure_anonymous_user
+from app.services.auth import claim_guest_trial, release_guest_trial, resolve_user
 from app.schemas.ai import Evaluation as EvaluationSchema
 from app.schemas.ai import FollowUpResponse, InterviewPlan
 from app.config import settings
@@ -61,6 +61,9 @@ async def _upsert_answer(
         db.add(answer)
 
     await db.commit()
+    # Reload so callers can read attributes without triggering a lazy
+    # refresh outside the session context.
+    await db.refresh(answer)
     return answer
 
 
@@ -104,6 +107,7 @@ async def _load_qa_pairs(
 async def start_interview(
     body: dict,
     anonymous_user_id: str | None = Header(default=None, alias="X-Anonymous-User-ID"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
     db: AsyncSession = Depends(get_db),
 ):
     resume_id = body.get("resume_id")
@@ -111,15 +115,31 @@ async def start_interview(
     seniority = body.get("seniority", "mid")
     job_description = body.get("job_description")
     duration_minutes = body.get("duration_minutes", 10)
+    interview_type = body.get("interview_type", "mixed")
+    # Default pace: roughly one question per two minutes, 4..10.
+    question_count = body.get(
+        "question_count", max(4, min(10, duration_minutes // 2))
+    )
 
     if not role:
         raise HTTPException(400, "Role is required")
     if not isinstance(duration_minutes, int) or not (2 <= duration_minutes <= 20):
         raise HTTPException(400, "Duration must be between 2 and 20 minutes")
+    if interview_type not in {"mixed", "behavioral", "technical", "case_study", "hr"}:
+        raise HTTPException(400, "Unsupported interview type")
+    if not isinstance(question_count, int) or not (3 <= question_count <= 15):
+        raise HTTPException(400, "Question count must be between 3 and 15")
     if job_description and len(job_description) > settings.max_job_description_chars:
         raise HTTPException(413, "Job description is too long")
 
-    user = await ensure_anonymous_user(db, anonymous_user_id)
+    user = await resolve_user(db, authorization, anonymous_user_id)
+    # Snapshot identity now: later commits expire ORM attributes.
+    user_pk = user.id
+    is_guest_user = user.is_guest
+    if is_guest_user:
+        # The free trial is deliberately smaller than a full interview.
+        question_count = min(question_count, settings.guest_max_questions)
+        duration_minutes = min(duration_minutes, settings.guest_max_duration_minutes)
     try:
         parsed_resume_id = uuid.UUID(resume_id)
     except (ValueError, AttributeError, TypeError):
@@ -135,9 +155,25 @@ async def start_interview(
     if not resume:
         raise HTTPException(404, "Resume not found")
 
+    # Read everything needed from the resume BEFORE any commit below:
+    # committing expires loaded attributes, and touching them afterwards
+    # forces a lazy refresh outside the async session context.
+    resume_data = resume.parsed_data or {}
+    # Snapshot before the trial claim below commits (and expires) objects.
+    resume_pk = resume.id
+
+    if is_guest_user and not await claim_guest_trial(db, user_pk):
+        raise HTTPException(
+            403,
+            {
+                "code": "GUEST_TRIAL_USED",
+                "message": "You have used your free guest interview. Create a free account to run more interviews.",
+            },
+        )
+
     interview = Interview(
-        user_id=user.id,
-        resume_id=resume.id,
+        user_id=user_pk,
+        resume_id=resume_pk,
         role=role,
         seniority=seniority,
         job_description=job_description,
@@ -147,20 +183,33 @@ async def start_interview(
     db.add(interview)
     await db.commit()
     await db.refresh(interview)
+    # Snapshot the PK now: later commits expire it (see resume_data above).
+    new_interview_id = interview.id
 
     prompt = gen_build_prompt(
-        resume.parsed_data or {},
+        resume_data,
         role,
         seniority,
         job_description,
+        interview_type=interview_type,
+        question_count=question_count,
     )
-    response = await groq_chat(GEN_SYSTEM_PROMPT, prompt, max_tokens=3072)
+    try:
+        response = await meta_chat(GEN_SYSTEM_PROMPT, prompt, max_tokens=3072)
+    except MetaClientError as e:
+        interview.status = "failed"
+        await db.commit()
+        if is_guest_user:
+            await release_guest_trial(db, user_pk)
+        raise meta_error_to_http(e)
 
     try:
         plan = InterviewPlan.model_validate_json(response)
     except (ValidationError, ValueError):
         interview.status = "failed"
         await db.commit()
+        if is_guest_user:
+            await release_guest_trial(db, user_pk)
         raise HTTPException(502, "Interview question provider returned invalid data")
 
     questions = plan.questions
@@ -177,10 +226,11 @@ async def start_interview(
     await db.commit()
 
     return {
-        "interview_id": str(interview.id),
+        "interview_id": str(new_interview_id),
         "role": role,
         "seniority": seniority,
         "duration_minutes": duration_minutes,
+        "interview_type": interview_type,
         "question_count": len(questions),
         "strategy": plan.strategy,
     }
@@ -241,9 +291,15 @@ async def interview_stream(websocket: WebSocket, interview_id: str):
                     "category": q.category,
                     "order": q.order,
                 })
-                audio = await synthesize_speech(q.text)
-                if audio:
-                    await manager.send_audio(interview_id, audio)
+                # Server-side TTS is optional (browser speechSynthesis is
+                # the default voice); never let it break the interview.
+                if tts_enabled():
+                    try:
+                        audio = await synthesize_speech(q.text)
+                    except TTSError:
+                        logger.warning("Skipping interview audio (TTS failed)")
+                    else:
+                        await manager.send_audio(interview_id, audio)
                 return True
 
             if not await send_question(0):
@@ -267,7 +323,18 @@ async def interview_stream(websocket: WebSocket, interview_id: str):
                             websocket.receive_bytes(), timeout=5.0
                         )
                         if audio_bytes:
-                            text = await transcribe_audio(audio_bytes)
+                            try:
+                                text = await transcribe_audio(audio_bytes)
+                            except STTError as stt_exc:
+                                logger.warning(
+                                    "Answer transcription failed: %s",
+                                    type(stt_exc).__name__,
+                                )
+                                await manager.send_json(interview_id, {
+                                    "type": "answer_error",
+                                    "text": "Your answer could not be transcribed. Please try again.",
+                                })
+                                continue
                     except asyncio.TimeoutError:
                         text = message.get("text", "")
                     except WebSocketDisconnect:
@@ -288,11 +355,19 @@ async def interview_stream(websocket: WebSocket, interview_id: str):
                         continue
 
                     current_question = db_questions[current_q_index]
+                    # Snapshot everything needed from ORM objects before the
+                    # commit inside _upsert_answer expires them.
+                    current_id = current_question.id
+                    current_text = current_question.text
+                    remaining = [
+                        {"text": q.text, "category": q.category}
+                        for q in db_questions[current_q_index + 1:]
+                    ]
                     try:
                         await _upsert_answer(
                             session,
                             interview.id,
-                            current_question.id,
+                            current_id,
                             text.strip(),
                         )
                     except SQLAlchemyError as exc:
@@ -309,20 +384,33 @@ async def interview_stream(websocket: WebSocket, interview_id: str):
                         "text": text,
                     })
 
-                    remaining = [
-                        {"text": q.text, "category": q.category}
-                        for q in db_questions[current_q_index + 1:]
-                    ]
-                    follow_up = await groq_chat(
-                        AGENT_SYSTEM_PROMPT,
-                        build_follow_up_prompt(
-                            current_question.text,
-                            text,
-                            resume_data,
-                            remaining,
-                        ),
-                        max_tokens=512,
-                    )
+                    try:
+                        follow_up = await meta_chat(
+                            AGENT_SYSTEM_PROMPT,
+                            build_follow_up_prompt(
+                                current_text,
+                                text,
+                                resume_data,
+                                remaining,
+                            ),
+                            max_tokens=512,
+                        )
+                    except MetaClientError as e:
+                        # The answer is already saved; fall through to the
+                        # next pre-generated question instead of inventing
+                        # interviewer content from a failed provider call.
+                        logger.warning(
+                            "Follow-up generation failed: %s",
+                            type(e).__name__,
+                        )
+                        await manager.send_json(interview_id, {
+                            "type": "error",
+                            "text": "Assistant is temporarily unavailable; moving to the next question.",
+                        })
+                        current_q_index += 1
+                        if not await send_question(current_q_index):
+                            break
+                        continue
 
                     try:
                         follow_up_data = FollowUpResponse.model_validate_json(follow_up)
@@ -341,19 +429,27 @@ async def interview_stream(websocket: WebSocket, interview_id: str):
                         next_q_text = follow_up_data.next_question or follow_up_data.response
                         if next_q_text:
                             current_q_index += 1
+                            next_q = db_questions[min(current_q_index, len(db_questions) - 1)]
+                            next_q_id = next_q.id
+                            next_q_category = next_q.category
+                            next_q_order = next_q.order
                             if current_q_index < len(db_questions):
                                 db_questions[current_q_index].text = next_q_text
                                 await session.commit()
                             await manager.send_json(interview_id, {
                                 "type": "question",
                                 "text": next_q_text,
-                                "question_id": str(db_questions[min(current_q_index, len(db_questions)-1)].id),
-                                "category": db_questions[min(current_q_index, len(db_questions)-1)].category,
-                                "order": db_questions[min(current_q_index, len(db_questions)-1)].order,
+                                "question_id": str(next_q_id),
+                                "category": next_q_category,
+                                "order": next_q_order,
                             })
-                            audio = await synthesize_speech(next_q_text)
-                            if audio:
-                                await manager.send_audio(interview_id, audio)
+                            if tts_enabled():
+                                try:
+                                    audio = await synthesize_speech(next_q_text)
+                                except TTSError:
+                                    logger.warning("Skipping interview audio (TTS failed)")
+                                else:
+                                    await manager.send_audio(interview_id, audio)
                         else:
                             current_q_index += 1
                             if not await send_question(current_q_index):
@@ -411,11 +507,27 @@ async def end_interview(body: dict, db: AsyncSession = Depends(get_db)):
         raise HTTPException(422, "Cannot evaluate an interview with no valid answers")
 
     eval_prompt = build_evaluation_prompt(answered_pairs)
-    eval_response = await groq_chat(EVAL_SYSTEM_PROMPT, eval_prompt, max_tokens=2048)
-
-    try:
-        evaluation = EvaluationSchema.model_validate_json(eval_response)
-    except (ValidationError, ValueError):
+    # Generous budget: reasoning models spend tokens on reasoning, and a
+    # truncated JSON object would fail validation below.
+    # One bounded retry on malformed model output only: transport and
+    # provider errors fail fast, and nothing is persisted until valid.
+    evaluation = None
+    for attempt in (1, 2):
+        try:
+            eval_response = await meta_chat(
+                EVAL_SYSTEM_PROMPT, eval_prompt, max_tokens=4096
+            )
+        except MetaClientError as e:
+            # Never persist a fabricated or empty evaluation.
+            raise meta_error_to_http(e)
+        try:
+            evaluation = EvaluationSchema.model_validate_json(eval_response)
+            break
+        except (ValidationError, ValueError):
+            logger.warning(
+                "Evaluation output failed validation (attempt %s/2)", attempt
+            )
+    if evaluation is None:
         raise HTTPException(502, "Evaluation provider returned invalid data")
 
     from app.models.evaluation import Evaluation as EvalModel
@@ -438,6 +550,29 @@ async def end_interview(body: dict, db: AsyncSession = Depends(get_db)):
         "evaluation": evaluation.model_dump(),
         "qa_pairs": qa_pairs,
     }
+
+
+@router.post("/transcribe")
+async def transcribe_answer_audio(file: UploadFile = File(...)):
+    """Transcribe one recorded answer (WAV, 16-bit mono PCM, 16/24 kHz).
+
+    Stateless helper for the REST answer flow: the caller uploads the
+    browser recording (converted client-side), receives ``{"text": ...}``
+    and then submits the (optionally edited) text via ``/submit-answer``.
+    """
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+
+    audio_bytes = await file.read(settings.meta_stt_max_bytes + 1)
+    if len(audio_bytes) > settings.meta_stt_max_bytes:
+        raise HTTPException(413, "Audio recording is too large")
+
+    try:
+        text = await transcribe_audio(audio_bytes)
+    except STTError as e:
+        raise stt_error_to_http(e)
+
+    return {"text": text}
 
 
 @router.post("/submit-answer")
@@ -473,5 +608,6 @@ async def submit_answer(body: dict, db: AsyncSession = Depends(get_db)):
         parsed_question_id,
         text.strip(),
     )
+    answer_id = answer.id
 
-    return {"status": "ok", "answer_id": str(answer.id)}
+    return {"status": "ok", "answer_id": str(answer_id)}

@@ -8,7 +8,7 @@ A production-ready MVP for an AI-powered mock interview platform. It simulates r
 
 - **Resume Upload & Analysis** — Upload a PDF or image; the system extracts and structures your skills, projects, experience, and education.
 - **Adaptive Interviewing** — Questions adapt dynamically based on your answers, resume content, and selected role/seniority.
-- **Real-Time Voice Pipeline** — Speak your answers, AI transcribes them (Whisper), processes them (Groq), and responds via voice (ElevenLabs).
+- **Real-Time Voice Pipeline** — Speak your answers, AI transcribes them (Meta Muse Voice Transcribe), processes them (Meta Muse Spark), and responds via voice (browser speechSynthesis by default, ElevenLabs server-side TTS optional).
 - **Webcam & Presence** — Live webcam feed during the interview with a clean, Meet-like interface.
 - **Multi-Agent Architecture** — Specialized agents handle resume analysis, interview generation, real-time conversation, and evaluation.
 - **Final Evaluation Report** — Overall score, strengths/weaknesses, suggestions, and a question-by-question breakdown.
@@ -20,7 +20,7 @@ A production-ready MVP for an AI-powered mock interview platform. It simulates r
 | Frontend    | React 19, TypeScript, Vite, TailwindCSS, Zustand, Socket.IO Client, WebRTC |
 | Backend     | FastAPI, Python 3.12, SQLAlchemy, LangGraph, WebSockets                    |
 | Database    | PostgreSQL (via Docker), SQLite (dev fallback)                             |
-| AI / APIs   | Groq API (LLM), Whisper (STT), ElevenLabs (TTS)                           |
+| AI / APIs   | Meta Muse Spark (LLM), Meta Muse Voice Transcribe (STT), ElevenLabs (optional TTS) |
 | OCR         | Tesseract OCR, pdfplumber, PyMuPDF                                         |
 | Infra       | Docker, Docker Compose                                                     |
 
@@ -36,7 +36,7 @@ The platform uses a **multi-agent** system:
 ### Voice Pipeline
 
 ```
-User voice → Whisper STT → Groq LLM → ElevenLabs TTS → User hears AI
+User voice → Meta Muse Voice Transcribe STT → Meta Muse Spark LLM → browser speechSynthesis (ElevenLabs TTS optional) → User hears AI
 ```
 
 ## Project Structure
@@ -83,15 +83,18 @@ Set the following environment variables (copy from `.env.example`):
 
 | Variable             | Description          |
 | -------------------- | -------------------- |
-| `GROQ_API_KEY`       | Groq LLM API key     |
-| `ELEVENLABS_API_KEY` | ElevenLabs TTS key   |
+| `META_API_KEY`       | Meta Model API key   |
+| `META_MODEL_DEV`     | Text model for dev (default `muse-spark-1.3`) |
+| `META_MODEL_PROD`    | Text model for prod (default `muse-spark-1.3`) |
+| `META_ENV`           | `dev` or `prod` model selection |
+| `ELEVENLABS_API_KEY` | ElevenLabs TTS key (optional; empty disables server TTS) |
 | `CORS_ORIGINS`       | Comma-separated frontend origins |
 
 For Docker deployment, copy `.env.example` to `.env` and replace the database
-password and provider placeholders. The frontend uses same-origin
-relative API and WebSocket URLs in the production container. When hosting the
-frontend separately, set the frontend build variables `VITE_API_URL` and,
-optionally, `VITE_WS_URL` to the deployed backend origin(s).
+password and provider placeholders. The frontend is a Next.js app that calls
+the backend directly in the browser: set `NEXT_PUBLIC_API_BASE_URL` (default
+`http://localhost:8000`) at frontend build time when the backend lives
+elsewhere.
 
 ### Running with Docker
 
@@ -115,33 +118,60 @@ cp .env.example .env  # fill in your keys
 uvicorn app.main:app --reload
 ```
 
-**Frontend:**
+**Frontend (Next.js, English UI):**
 
 ```bash
 cd frontend
 npm install
-npm run dev
+cp .env.example .env.local  # optional: NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+npm run dev     # http://localhost:3000
 ```
+
+All API routes are prefixed with `/api`. Anonymous identification uses the
+`X-Anonymous-User-ID` header, generated and persisted by the frontend.
 
 ## API Endpoints
 
-| Method | Path                  | Description              |
-| ------ | --------------------- | ------------------------ |
-| POST   | `/upload-resume`      | Upload a resume file     |
-| POST   | `/analyze-resume`     | Extract structured data  |
-| POST   | `/start-interview`    | Begin an interview       |
-| WS     | `/interview-stream`   | Real-time interview      |
-| POST   | `/submit-answer`      | Submit an answer         |
-| POST   | `/end-interview`      | End the interview        |
-| GET    | `/report/{id}`        | Get evaluation report    |
-| GET    | `/health`             | Health check             |
+| Method | Path                    | Description                              |
+| ------ | ----------------------- | ---------------------------------------- |
+| POST   | `/api/upload-resume`    | Upload a resume file (multipart `file`)  |
+| POST   | `/api/analyze-resume`   | Extract structured data (`?resume_id=`)  |
+| POST   | `/api/start-interview`  | Begin an interview                       |
+| WS     | `/api/interview-stream` | Real-time interview (legacy transport)   |
+| POST   | `/api/transcribe`       | Transcribe a WAV answer (`multipart file`) |
+| POST   | `/api/submit-answer`    | Submit an answer (text)                  |
+| POST   | `/api/end-interview`    | End the interview, generate evaluation   |
+| GET    | `/api/report/{id}`      | Get questions, answers and evaluation    |
+| GET    | `/health`               | Health check                             |
+
+The canonical answer flow is 100% REST: browser recording →
+16 kHz mono WAV conversion → `POST /api/transcribe` → `POST /api/submit-answer`.
+The WebSocket is no longer used for answers.
 
 ## Frontend Pages
 
-- **`/`** — Landing page with hero, features, how-it-works, and CTA.
-- **`/dashboard`** — Resume upload, role/difficulty selection, start interview.
-- **`/interview/:id`** — Live interview room with webcam, AI voice, timer.
-- **`/report/:id`** — Evaluation report with score, feedback, and breakdown.
+- **`/`** — Home: value proposition, steps, "Start a simulation" CTA.
+- **`/upload`** — Resume drop (drag-and-drop, PDF/PNG/JPEG, 5 MB max).
+- **`/analyse`** — Extracted skills, experience, projects, and education.
+- **`/configurer`** — Interview type (mixed, behavioral, technical, case study, HR), target role, seniority, optional job description, duration, and question count (3–15; backend derives a default of ~1 per 2 min).
+- **`/entretien/[id]`** — Video-call interview room: large live camera stage with mic-level meter, hands-free mode (question spoken, silence auto-sends your answer), manual mode, playback, transcription, submit, safe finish gating.
+- **`/rapport/[id]`** — Score out of 100, strengths, areas to improve, tips, per-question breakdown.
+
+## Tests
+
+```bash
+cd backend && .venv/bin/python -m unittest discover -s tests   # 74 tests
+cd frontend && npm test        # vitest: 39 tests
+cd frontend && npm run build   # production Next.js build
+```
+
+## Known limitations
+
+- Transcription requires 16-bit mono WAV at 16 or 24 kHz: the frontend converts via Web Audio, which needs a recent browser (microphone + `AudioContext`).
+- The generation model produces a variable question count (14 observed) regardless of the chosen duration: duration remains a pacing guide for the candidate.
+- The model can occasionally return invalid evaluation JSON: `POST /api/end-interview` retries once, then answers 502 and the frontend offers a lossless retry.
+- No interview history: the backend exposes no list endpoint; the frontend only keeps the in-progress identifiers.
+- Camera self-view is a local preview (never uploaded); real-browser microphone/camera behavior still needs live testing.
 
 ## MVP Scope
 
