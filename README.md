@@ -1,8 +1,16 @@
 # AI Interview Simulator
 
+> **Built for the Meta Global AI Developer Hackathon**
+
 A production-ready MVP for an AI-powered mock interview platform. It simulates realistic job interviews in real-time using voice interaction, webcam presence, resume analysis, adaptive questioning, and final performance evaluation.
 
 > This is **not** a chatbot — it must feel like a real interview.
+
+## Meta Global AI Developer Hackathon
+
+This project was built for the **Meta Global AI Developer Hackathon**.
+
+It uses Meta's Muse models — **Meta Muse Spark** for interview reasoning, question generation, and evaluation, and **Meta Muse Voice Transcribe** for speech-to-text — to deliver a realistic, voice-first interview experience. Candidates upload a resume, practice with an adaptive AI interviewer, and receive a structured performance report to prepare for real job interviews.
 
 ## Features
 
